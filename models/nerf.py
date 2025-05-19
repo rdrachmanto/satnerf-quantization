@@ -1,6 +1,7 @@
 """
 This script defines the NeRF architecture
 """
+import time
 
 import numpy as np
 import torch
@@ -87,6 +88,8 @@ def inference(model, args, rays_xyz, z_vals, rays_d=None):
     N_rays = rays_xyz.shape[0]
     N_samples = rays_xyz.shape[1]
     xyz_ = rays_xyz.view(-1, 3)  # (N_rays*N_samples, 3)
+    # print("[nerf.inference:91]: N_rays, N_samples: ", N_rays, N_samples)
+    # print("[nerf.inference:92]: xyz_.shape: ", xyz_.shape)
 
     # check if there are additional inputs, which are used or not depending on the nerf variant
     rays_d_ = None if rays_d is None else torch.repeat_interleave(rays_d, repeats=N_samples, dim=0)
@@ -97,10 +100,16 @@ def inference(model, args, rays_xyz, z_vals, rays_d=None):
 
     # run model
     out_chunks = []
-    for i in range(0, batch_size, chunk):
-        input_dir = None if rays_d_ is None else rays_d_[i:i + chunk]
-        out_chunks += [model(xyz_[i:i+chunk], input_dir=input_dir)]
-    out = torch.cat(out_chunks, 0)
+    # start_time = time.time()
+
+    # print("[nerf.inference:105]: batch_size, chunk: ", batch_size, chunk)
+    # for i in range(0, 5242880, 81920)
+    # for i in range(0, batch_size, chunk):
+    #     input_dir = rays_d_[i:i + chunk] if rays_d_ is not None else None
+    #     out_chunks += [model(xyz_[i:i+chunk], input_direction=input_dir)]
+    # # print("Model forward time: ", time.time() - start_time)
+    # out = torch.cat(out_chunks, 0)
+    out = model(xyz_, input_direction=rays_d_ if rays_d_ is not None else None)
 
     # retreive outputs
     out_channels = model.number_of_outputs
@@ -138,7 +147,7 @@ class NeRF(torch.nn.Module):
         self.layers = layers
         self.skips = skips
         self.mapping = mapping
-        self.input_sizes = [3, 3]
+        self.input_sizes = [3, 3] # hardcoded, WTF? "if self.input_sizes[1] > 0:" in line 32 always TRUE
         self.rgb_padding = 0.001
         self.number_of_outputs = 4
 
@@ -181,7 +190,7 @@ class NeRF(torch.nn.Module):
             self.fc_net[0].apply(first_layer_sine_init)
 
 
-    def forward(self, input_xyz, input_dir=None, sigma_only=False):
+    def forward(self, input_xyz, input_direction=None, sigma_only=False):
         """
         Predicts the values rgb, sigma from a batch of input rays
         the input rays are represented as a set of 3d points xyz
@@ -197,14 +206,19 @@ class NeRF(torch.nn.Module):
                 out: (B, 4) first 3 columns are rgb color, last column is volume density
         """
 
-        # compute shared features
+        # compute shared features, it creates 60 inputs from initial 3 inputs
+        # print("[nerf.NeRF.forward:209]: input_xyz.shape:", input_xyz.shape)
         input_xyz = self.mapping[0](input_xyz)
+        # print("[nerf.NeRF.forward:209]: input_xyz.shape after mapping:", input_xyz.shape)
+
         xyz_ = input_xyz
         for i in range(self.layers):
             if i in self.skips:
                 xyz_ = torch.cat([input_xyz, xyz_], -1)
-            xyz_ = self.fc_net[2*i](xyz_)
-            xyz_ = self.fc_net[2*i + 1](xyz_)
+            # print("[nerf.NeRF.forward:219] xyz_.shape: ", xyz_.shape)
+            xyz_ = self.fc_net[2*i](xyz_)       # Linear
+            xyz_ = self.fc_net[2*i + 1](xyz_)   # ReLU
+
         shared_features = xyz_
 
         # compute volume density
@@ -214,11 +228,16 @@ class NeRF(torch.nn.Module):
 
         # compute color
         xyz_features = self.feats_from_xyz(shared_features)
+        # print("self.input_sizes: ", self.input_sizes)
+        # print("input_direction", input_direction.shape)
+        # print("[nerf.NeRF.forward:233] self.input_sizes: ", self.input_sizes)
         if self.input_sizes[1] > 0:
-            input_xyzdir = torch.cat([xyz_features, self.mapping[1](input_dir)], -1)
+            # print("[nerf.NeRF.forward:235] if self.input_sizes[1] > 0 TRUE")
+            input_xyzdir = torch.cat([xyz_features, self.mapping[1](input_direction)], -1)
         else:
             input_xyzdir = xyz_features
         rgb = self.rgb_from_xyzdir(input_xyzdir)
+
         # improvement suggested by Jon Barron to help stability (same paper as soft+ suggestion)
         rgb = rgb * (1 + 2 * self.rgb_padding) - self.rgb_padding
 

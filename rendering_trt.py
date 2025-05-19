@@ -7,7 +7,12 @@ and predicts a volume density at each location (sigma) and the color with which 
 import sys
 import time
 
+from models.satnerf import inference_trt
 import torch
+
+from polygraphy.backend.common import BytesFromPath
+from polygraphy.backend.trt import EngineFromBytes, TrtRunner
+
 
 def sample_pdf(bins, weights, N_importance, det=False, eps=1e-5):
     """
@@ -51,8 +56,7 @@ def sample_pdf(bins, weights, N_importance, det=False, eps=1e-5):
     return samples
 
 
-def render_rays(models, args, rays, ts):
-
+def render_rays(models, runner, args, rays, ts):
     # get config values
     N_samples = args.n_samples
     N_importance = args.n_importance
@@ -89,81 +93,81 @@ def render_rays(models, args, rays, ts):
 
     # run coarse model
     typ = "coarse"
-    if variant == "s-nerf":
-        from models.snerf import inference
-        sun_d = rays[:, 8:11]
-        # render using main set of rays
-        result = inference(models[typ], args, xyz_coarse, z_vals, rays_d=None, sun_d=sun_d)
-        if args.sc_lambda > 0:
-            # solar correction
-            xyz_coarse = rays_o.unsqueeze(1) + sun_d.unsqueeze(1) * z_vals.unsqueeze(2)  # (N_rays, N_samples, 3)
-            result_ = inference(models[typ], args, xyz_coarse, z_vals, rays_d=None, sun_d=sun_d)
-            result['weights_sc'] = result_["weights"]
-            result['transparency_sc'] = result_["transparency"]
-            result['sun_sc'] = result_["sun"]
-    elif variant == "sat-nerf":
+    # if variant == "s-nerf":
+    #     from models.snerf import inference
+    #     sun_d = rays[:, 8:11]
+    #     # render using main set of rays
+    #     result = inference(models[typ], args, xyz_coarse, z_vals, rays_d=None, sun_d=sun_d)
+    #     if args.sc_lambda > 0:
+    #         # solar correction
+    #         xyz_coarse = rays_o.unsqueeze(1) + sun_d.unsqueeze(1) * z_vals.unsqueeze(2)  # (N_rays, N_samples, 3)
+    #         result_ = inference(models[typ], args, xyz_coarse, z_vals, rays_d=None, sun_d=sun_d)
+    #         result['weights_sc'] = result_["weights"]
+    #         result['transparency_sc'] = result_["transparency"]
+    #         result['sun_sc'] = result_["sun"]
+    if variant == "sat-nerf":
         from models.satnerf import inference
         sun_d = rays[:, 8:11]
         rays_t = models['t'](ts) if ts is not None else None
         # start = time.time()
-        result = inference(models[typ], args, xyz_coarse, z_vals, rays_d=None, sun_d=sun_d, rays_t=rays_t)
+        result = inference_trt(runner, args, xyz_coarse, z_vals, rays_d=None, sun_d=sun_d, rays_t=rays_t)
         # print("[rendering.render_rays:99] Inference time: ", (time.time() - start) * 1000)
 
-        if args.sc_lambda > 0:
-            # solar correction
-            xyz_coarse = rays_o.unsqueeze(1) + sun_d.unsqueeze(1) * z_vals.unsqueeze(2)  # (N_rays, N_samples, 3)
-            result_tmp = inference(models[typ], args, xyz_coarse, z_vals, rays_d=None, sun_d=sun_d, rays_t=rays_t)
-            result['weights_sc'] = result_tmp["weights"]
-            result['transparency_sc'] = result_tmp["transparency"]
-            result['sun_sc'] = result_tmp["sun"]
-    else:
-        # classic nerf
-        from models.nerf import inference
-        # print("[rendering.render_rays:95] xyz_coarse shape: ", xyz_coarse.shape)
-        result = inference(models[typ], args, xyz_coarse, z_vals, rays_d=rays_d)
+        # if args.sc_lambda > 0:
+        #     # solar correction
+        #     xyz_coarse = rays_o.unsqueeze(1) + sun_d.unsqueeze(1) * z_vals.unsqueeze(2)  # (N_rays, N_samples, 3)
+        #     result_tmp = inference(models[typ], args, xyz_coarse, z_vals, rays_d=None, sun_d=sun_d, rays_t=rays_t)
+        #     result['weights_sc'] = result_tmp["weights"]
+        #     result['transparency_sc'] = result_tmp["transparency"]
+        #     result['sun_sc'] = result_tmp["sun"]
+    # else:
+    #     # classic nerf
+    #     from models.nerf import inference
+    #     # print("[rendering.render_rays:95] xyz_coarse shape: ", xyz_coarse.shape)
+    #     result = inference(models[typ], args, xyz_coarse, z_vals, rays_d=rays_d)
     result_ = {}
     for k in result.keys():
         result_[f"{k}_{typ}"] = result[k]
 
     # run fine model
-    if N_importance > 0:
+    # if N_importance > 0:
 
-        # sample depths for fine model
-        z_vals_mid = 0.5 * (z_vals[:, :-1] + z_vals[:, 1:])  # (N_rays, N_samples-1) interval mid points
-        z_vals_ = sample_pdf(z_vals_mid, result_['weights_coarse'][:, 1:-1],
-                             N_importance, det=(perturb == 0)).detach()
-        # detach so that grad doesn't propogate to weights_coarse from here
-        z_vals, _ = torch.sort(torch.cat([z_vals, z_vals_], -1), -1)
+    #     # sample depths for fine model
+    #     z_vals_mid = 0.5 * (z_vals[:, :-1] + z_vals[:, 1:])  # (N_rays, N_samples-1) interval mid points
+    #     z_vals_ = sample_pdf(z_vals_mid, result_['weights_coarse'][:, 1:-1],
+    #                          N_importance, det=(perturb == 0)).detach()
+    #     # detach so that grad doesn't propogate to weights_coarse from here
+    #     z_vals, _ = torch.sort(torch.cat([z_vals, z_vals_], -1), -1)
 
-        # discretize rays for fine model
-        xyz_fine = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * z_vals.unsqueeze(2) # (N_rays, N_samples+N_importance, 3)
+    #     # discretize rays for fine model
+    #     xyz_fine = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * z_vals.unsqueeze(2) # (N_rays, N_samples+N_importance, 3)
 
-        typ = "fine"
-        if variant == "s-nerf":
-            sun_d = rays[:, 8:11]
-            # render using main set of rays
-            result = inference(models[typ], args, xyz_fine, z_vals, rays_d=rays_d_, sun_d=sun_d)
-            if args.sc_lambda > 0:
-                # solar correction
-                xyz_fine = rays_o.unsqueeze(1) + sun_d.unsqueeze(1) * z_vals.unsqueeze(2)  # (N_rays, N_samples, 3)
-                result_ = inference(models[typ], args, xyz_fine, z_vals, rays_d=None, sun_d=sun_d, rays_t=None)
-                result['weights_sc'] = result_["weights"]
-                result['transparency_sc'] = result_["transparency"]
-                result['sun_sc'] = result_["sun"]
-        elif variant == "sat-nerf":
-            sun_d = rays[:, 8:11]
-            rays_t = models['t'](ts) if ts is not None else None
-            result = inference(models[typ], args, xyz_fine, z_vals, rays_d=None, sun_d=sun_d, rays_t=rays_t)
-            if args.sc_lambda > 0:
-                # solar correction
-                xyz_fine = rays_o.unsqueeze(1) + sun_d.unsqueeze(1) * z_vals.unsqueeze(2)  # (N_rays, N_samples, 3)
-                result_ = inference(models[typ], args, xyz_fine, z_vals, rays_d=None, sun_d=sun_d, rays_t=rays_t)
-                result['weights_sc'] = result_["weights"]
-                result['transparency_sc'] = result_["transparency"]
-                result['sun_sc'] = result_["sun"]
-        else:
-            result = inference(models[typ], args, xyz_fine, z_vals, rays_d=rays_d)
-        for k in result.keys():
-            result_["{}_{}".format(k, typ)] = result[k]
+    #     typ = "fine"
+    #     if variant == "s-nerf":
+    #         sun_d = rays[:, 8:11]
+    #         # render using main set of rays
+    #         result = inference(models[typ], args, xyz_fine, z_vals, rays_d=rays_d_, sun_d=sun_d)
+    #         if args.sc_lambda > 0:
+    #             # solar correction
+    #             xyz_fine = rays_o.unsqueeze(1) + sun_d.unsqueeze(1) * z_vals.unsqueeze(2)  # (N_rays, N_samples, 3)
+    #             result_ = inference(models[typ], args, xyz_fine, z_vals, rays_d=None, sun_d=sun_d, rays_t=None)
+    #             result['weights_sc'] = result_["weights"]
+    #             result['transparency_sc'] = result_["transparency"]
+    #             result['sun_sc'] = result_["sun"]
+    #     elif variant == "sat-nerf":
+    #         sun_d = rays[:, 8:11]
+    #         rays_t = models['t'](ts) if ts is not None else None
+    #         result = inference(models[typ], args, xyz_fine, z_vals, rays_d=None, sun_d=sun_d, rays_t=rays_t)
+    #         if args.sc_lambda > 0:
+    #             # solar correction
+    #             xyz_fine = rays_o.unsqueeze(1) + sun_d.unsqueeze(1) * z_vals.unsqueeze(2)  # (N_rays, N_samples, 3)
+    #             result_ = inference(models[typ], args, xyz_fine, z_vals, rays_d=None, sun_d=sun_d, rays_t=rays_t)
+    #             result['weights_sc'] = result_["weights"]
+    #             result['transparency_sc'] = result_["transparency"]
+    #             result['sun_sc'] = result_["sun"]
+    #     else:
+    #         result = inference(models[typ], args, xyz_fine, z_vals, rays_d=rays_d)
+    #     for k in result.keys():
+    #         result_["{}_{}".format(k, typ)] = result[k]
 
     return result_

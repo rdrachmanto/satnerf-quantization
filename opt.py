@@ -59,6 +59,8 @@ def get_opts():
                         help='standard deviation of noise added to sigma to regularize')
     parser.add_argument('--chunk', type=int, default=1024*5,
                         help='maximum number of rays that can be processed at once without memory issues')
+    parser.add_argument('--prune_ratio', type=float, default=0.0,
+                        help='prune ratio if prune enabled')
 
     # other sat-nerf specific stuff
     parser.add_argument('--sc_lambda', type=float, default=0.,
@@ -75,6 +77,11 @@ def get_opts():
                         help='portion of training steps at which the depth supervision loss will be dropped')
     parser.add_argument('--t_embbeding_vocab', type=int, default=30,
                         help='portion of training steps at which the depth supervision loss will be dropped')
+
+    parser.add_argument('--add_cloud', action="store_true", default=False,
+                        help='flag to inject cloud')
+    parser.add_argument('--cloud_first_n', type=int, default=0,
+                        help='first n images to be injected with cloud')
 
     args = parser.parse_args()
 

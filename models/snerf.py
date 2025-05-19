@@ -24,6 +24,7 @@ def inference(model, args, rays_xyz, z_vals, rays_d=None, sun_d=None):
     # check if there are additional inputs, which are used or not depending on the nerf variant
     rays_d_ = None if rays_d is None else torch.repeat_interleave(rays_d, repeats=N_samples, dim=0)
     sun_d_ = None if sun_d is None else torch.repeat_interleave(sun_d, repeats=N_samples, dim=0)
+    # print("[snerf.inference:28] sun_d_.shape: ", sun_d_.shape)
 
     # the input batch is split in chunks to avoid possible problems with memory usage
     chunk = args.chunk
@@ -31,11 +32,16 @@ def inference(model, args, rays_xyz, z_vals, rays_d=None, sun_d=None):
 
     # run model
     out_chunks = []
-    for i in range(0, batch_size, chunk):
-        out_chunks += [model(xyz_[i:i+chunk],
-                             input_dir=None if rays_d_ is None else rays_d_[i:i + chunk],
-                             input_sun_dir=None if sun_d_ is None else sun_d_[i:i + chunk])]
-    out = torch.cat(out_chunks, 0)
+    # print("[snerf.inference:36] batch_size: ", batch_size)
+    # for i in range(0, batch_size, chunk):
+    #     out_chunks += [model(xyz_[i:i+chunk],
+    #                          input_direction=None if rays_d_ is None else rays_d_[i:i + chunk],
+    #                          input_sun_direction=None if sun_d_ is None else sun_d_[i:i + chunk])]
+    #     break
+    # out = torch.cat(out_chunks, 0)
+    out = model(xyz_,
+                input_direction=None if rays_d_ is None else rays_d_,
+                input_sun_direction=None if sun_d_ is None else sun_d_)
 
     # retreive outputs
     out_channels = model.number_of_outputs
@@ -81,7 +87,7 @@ class ShadowNeRF(torch.nn.Module):
         self.layers = layers
         self.skips = skips
         self.mapping = mapping
-        self.input_sizes = [3, 0]
+        self.input_sizes = [3, 0] # hardcoded, WTF??? "if self.input_sizes[1] > 0:" in line 184 will always be TRUE
         self.rgb_padding = 0.001
         self.number_of_outputs = 8 # rgb (3) + sigma (1) + sun visibility (1) + rgb from sky color (3)
 
@@ -145,7 +151,7 @@ class ShadowNeRF(torch.nn.Module):
             self.sun_v_net[0].apply(first_layer_sine_init)
 
 
-    def forward(self, input_xyz, input_dir=None, input_sun_dir=None, sigma_only=False):
+    def forward(self, input_xyz, input_direction=None, input_sun_direction=None, sigma_only=False):
         """
         Predicts the values rgb, sigma from a batch of input rays
         the input rays are represented as a set of 3d points xyz
@@ -164,6 +170,7 @@ class ShadowNeRF(torch.nn.Module):
         # compute shared features
         input_xyz = self.mapping[0](input_xyz)
         xyz_ = input_xyz
+        # print("[snerf.ShadowNeRF.forward:167] xyz_.shape: ", xyz_.shape)
         for i in range(self.layers):
             if i in self.skips:
                 xyz_ = torch.cat([input_xyz, xyz_], -1)
@@ -178,19 +185,22 @@ class ShadowNeRF(torch.nn.Module):
 
         # compute color
         xyz_features = self.feats_from_xyz(shared_features)
+        # print("[snerf.ShadowNeRF.forward:183] self.input_sizes: ", self.input_sizes)
         if self.input_sizes[1] > 0:
-            input_xyzdir = torch.cat([xyz_features, self.mapping[1](input_dir)], -1)
+            input_xyzdir = torch.cat([xyz_features, self.mapping[1](input_direction)], -1)
         else:
             input_xyzdir = xyz_features
         rgb = self.rgb_from_xyzdir(input_xyzdir)
+
         # improvement suggested by Jon Barron to help stability (same paper as soft+ suggestion)
         rgb = rgb * (1 + 2 * self.rgb_padding) - self.rgb_padding
         out = torch.cat([rgb, sigma], 1) # (B, 4)
 
         # extra outputs
-        input_sun_v_net = torch.cat([xyz_features, input_sun_dir], -1)
+        # print("[snerf.ShadowNeRF.forward:195] input_sun_direction.shape: ", input_sun_direction.shape)
+        input_sun_v_net = torch.cat([xyz_features, input_sun_direction], -1)
         sun_v = self.sun_v_net(input_sun_v_net)
-        sky_color = self.sky_color(input_sun_dir)
+        sky_color = self.sky_color(input_sun_direction)
         out = torch.cat([out, sun_v, sky_color], 1) # (B, 8)
 
         return out

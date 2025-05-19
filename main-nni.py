@@ -1,26 +1,18 @@
 #!/bin/env python
-import faulthandler
-faulthandler.enable()
-
 import argparse
 
 import torch
+import nni
 import pytorch_lightning as pl
+from pytorch_lightning.utilities.warnings import LightningDeprecationWarning
+
 from opt import get_opts
-print("import opt")
-
 from datasets import load_dataset, satellite
-print("import datasets")
-
 from metrics import load_loss, DepthLoss, SNerfLoss
-print("import metrics")
 from torch.utils.data import DataLoader
-print("import torch.utils.data")
 from collections import defaultdict
-print("import collections")
 
 from rendering import render_rays
-
 from models import load_model
 import train_utils
 import metrics
@@ -28,14 +20,13 @@ import os
 import numpy as np
 import datetime
 from sat_utils import compute_mae_and_save_dsm_diff
-print("sat_utils")
 
-from eval_satnerf import find_best_embbeding_for_val_image, save_nerf_output_to_images, predefined_val_ts, load_nerf
+from eval_satnerf import find_best_embbeding_for_val_image, save_nerf_output_to_images, predefined_val_ts
 
-# os.environ["CUDA_VISIBLE_DEVICES"] = "1, 2"
-# pl.seed_everything(42)
-# pl.seed_everything(1000)
-print("before seed")
+import warnings
+warnings.filterwarnings("ignore", category=LightningDeprecationWarning)
+
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2"
 pl.seed_everything(3407)
 
 class NeRF_pl(pl.LightningModule):
@@ -79,10 +70,9 @@ class NeRF_pl(pl.LightningModule):
 
         results = defaultdict(list)
         for i in range(0, batch_size, chunk_size):
-            rendered_ray_chunks = render_rays(self.models,
-                                              self.args,
-                                              rays[i:i + chunk_size],
-                                              ts[i:i + chunk_size] if ts is not None else None)
+            rendered_ray_chunks = \
+                render_rays(self.models, self.args, rays[i:i + chunk_size],
+                            ts[i:i + chunk_size] if ts is not None else None)
             for k, v in rendered_ray_chunks.items():
                 results[k] += [v]
 
@@ -95,6 +85,7 @@ class NeRF_pl(pl.LightningModule):
         self.val_dataset = [] + load_dataset(self.args, split="val")
 
     def configure_optimizers(self):
+
         parameters = train_utils.get_parameters(self.models)
         self.optimizer = torch.optim.Adam(parameters, lr=self.args.lr, weight_decay=0)
 
@@ -175,7 +166,6 @@ class NeRF_pl(pl.LightningModule):
         rgbs = rgbs.squeeze()  # (H*W, 3)
         if self.args.model == "sat-nerf":
             t = predefined_val_ts(batch["src_id"][0])
-            # t = predefined_val_ts(batch["src_id"][1])
             ts = t * torch.ones(rays.shape[0], 1).long().cuda().squeeze()
         else:
             ts = None
@@ -191,7 +181,6 @@ class NeRF_pl(pl.LightningModule):
             W, H = batch["w"], batch["h"]
         else:
             W = H = int(torch.sqrt(torch.tensor(rays.shape[0]).float())) # assume squared images
-
         img = results[f'rgb_{typ}'].view(H, W, 3).permute(2, 0, 1).cpu()  # (3, H, W)
         img_gt = rgbs.view(H, W, 3).permute(2, 0, 1).cpu()  # (3, H, W)
         depth = train_utils.visualize_depth(results[f'depth_{typ}'].view(H, W))  # (3, H, W)
@@ -237,6 +226,7 @@ class NeRF_pl(pl.LightningModule):
                 except Exception as e:
                     print(e)
 
+                # nni.report_intermediate_result(float(psnr_))
                 self.log("val/loss", loss)
                 self.log("val/psnr", psnr_)
                 self.log("val/ssim", ssim_)
@@ -249,15 +239,21 @@ class NeRF_pl(pl.LightningModule):
     def get_current_epoch(self, tstep):
         return train_utils.get_epoch_number_from_train_step(tstep, len(self.train_dataset[0]), self.args.batch_size)
 
+
 def main():
 
-    print("before empty cache")
     torch.cuda.empty_cache()
-    print("after empty cache")
     args = get_opts()
-    # print(args)
+
+    # retrieving the parameters
+    params = nni.get_next_parameter()
+    args.fc_layers = params.get('layers')
+    args.fc_units = int(params.get('feat'))
+    args.lr = params.get('lr')
+    args.noise_std = params.get('std')
+    args.n_samples = int(params.get('n_samples'))
+
     system = NeRF_pl(args)
-    print(system)
 
     logger = pl.loggers.TensorBoardLogger(save_dir=args.logs_dir, name=args.exp_name, default_hp_metric=False)
 
@@ -272,7 +268,7 @@ def main():
                          logger=logger,
                          callbacks=[ckpt_callback],
                          resume_from_checkpoint=args.ckpt_path,
-                         gpus=[args.gpu_id],
+                         gpus=1,
                          auto_select_gpus=False,
                          deterministic=True,
                          benchmark=True,
@@ -282,6 +278,8 @@ def main():
                          profiler="simple")
 
     trainer.fit(system)
+
+    nni.report_final_result(system.trainer.logged_metrics["val/psnr"].item())
 
 
 if __name__ == "__main__":

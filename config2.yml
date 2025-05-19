@@ -1,0 +1,16 @@
+experimentName: s_nas_TPE_nni_jax467
+trialConcurrency: 1
+maxExperimentDuration: 20h
+maxTrialNumber: 50
+searchSpaceFile: search_space.json
+useAnnotation: false
+trialCommand: bash train-nni-snerf2.sh
+trialCodeDirectory: .
+trialGpuNumber: 1
+tuner:
+  name: TPE
+  classArgs:
+    optimize_mode: maximize
+trainingService:
+  platform: local
+  useActiveGpu: False

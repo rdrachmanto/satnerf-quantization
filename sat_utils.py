@@ -154,6 +154,7 @@ def dsm_pointwise_diff(in_dsm_path, gt_dsm_path, dsm_metadata, gt_mask_path=None
     # read predicted and gt dsms
     with rasterio.open(gt_dsm_path, "r") as f:
         gt_dsm = f.read()[0, :, :]
+
     with rasterio.open(pred_dsm_path, "r") as f:
         profile = f.profile
         pred_dsm = f.read()[0, :, :]
@@ -163,8 +164,9 @@ def dsm_pointwise_diff(in_dsm_path, gt_dsm_path, dsm_metadata, gt_mask_path=None
     try:
         import dsmr
     except:
-        print("Warning: dsmr not found ! DSM registration will only use the Z dimension")
+        # print("Warning: dsmr not found ! DSM registration will only use the Z dimension")
         fix_xy = True
+
     if fix_xy:
         pred_rdsm = pred_dsm + np.nanmean((gt_dsm - pred_dsm).ravel())
         with rasterio.open(pred_rdsm_path, 'w', **profile) as dst:
@@ -178,13 +180,22 @@ def dsm_pointwise_diff(in_dsm_path, gt_dsm_path, dsm_metadata, gt_mask_path=None
     err = pred_rdsm - gt_dsm
 
     # remove tmp files and write output tifs if desired
-    os.remove(pred_dsm_path)
+    try:
+        os.remove(pred_dsm_path)
+    except Exception as e:
+        print(e)
+
     if out_rdsm_path is not None:
         if os.path.exists(out_rdsm_path):
             os.remove(out_rdsm_path)
         os.makedirs(os.path.dirname(out_rdsm_path), exist_ok=True)
         shutil.copyfile(pred_rdsm_path, out_rdsm_path)
-    os.remove(pred_rdsm_path)
+
+    try:
+        os.remove(pred_rdsm_path)
+    except Exception as e:
+        print(e)
+
     if out_err_path is not None:
         if os.path.exists(out_err_path):
             os.remove(out_err_path)
@@ -210,8 +221,13 @@ def compute_mae_and_save_dsm_diff(pred_dsm_path, src_id, gt_dir, out_dir, epoch_
     gt_roi_metadata = np.loadtxt(gt_roi_path)
     rdsm_diff_path = os.path.join(out_dir, "{}_rdsm_diff_epoch{}.tif".format(src_id, epoch_number))
     rdsm_path = os.path.join(out_dir, "{}_rdsm_epoch{}.tif".format(src_id, epoch_number))
-    diff = dsm_pointwise_diff(pred_dsm_path, gt_dsm_path, gt_roi_metadata, gt_mask_path=gt_seg_path,
-                                       out_rdsm_path=rdsm_path, out_err_path=rdsm_diff_path)
+    diff = dsm_pointwise_diff(pred_dsm_path,
+                              gt_dsm_path,
+                              gt_roi_metadata,
+                              gt_mask_path=gt_seg_path,
+                              out_rdsm_path=rdsm_path,
+                              out_err_path=rdsm_diff_path)
+
     #os.system(f"rm tmp*.tif.xml")
     if not save:
         os.remove(rdsm_diff_path)

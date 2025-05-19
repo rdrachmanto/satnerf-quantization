@@ -2,18 +2,38 @@
 This script defines the dataloader for a dataset of multi-view satellite images
 """
 
+# print("enter satellite.py")
+
+import rpcm
+# print("import rpcm")
 import numpy as np
+# print("import numpy as np")
 import os
 
 import torch
+# print("import torch")
 from torch.utils.data import Dataset
+# print("from torch.utils.data import Dataset")
 from PIL import Image
-from torchvision import transforms as T
+# print("from PIL import Image")
+#from torchvision import transforms as T
+#print("from torchvision import transforms as T")
 
 import rasterio
-import rpcm
+# print("import rasterio")
+#import rpcm
+#print("import rpcm")
 import glob
+# print("import glob")
 import sat_utils
+# print("import sat_utils")
+from torchvision import transforms as T
+
+import multiprocessing as mp
+from functools import partial
+
+# from datasets.cloud import *
+
 
 def get_rays(cols, rows, rpc, min_alt, max_alt):
     """
@@ -64,9 +84,11 @@ def get_rays(cols, rows, rpc, min_alt, max_alt):
     rays = rays.type(torch.FloatTensor)
     return rays
 
-def load_tensor_from_rgb_geotiff(img_path, downscale_factor, imethod=Image.BICUBIC):
+
+def load_tensor_from_rgb_geotiff(img_path, downscale_factor, imethod=Image.BICUBIC, inject=None):
     with rasterio.open(img_path, 'r') as f:
         img = np.transpose(f.read(), (1, 2, 0)) / 255.
+
     h, w = img.shape[:2]
     if downscale_factor > 1:
         w = int(w // downscale_factor)
@@ -75,13 +97,30 @@ def load_tensor_from_rgb_geotiff(img_path, downscale_factor, imethod=Image.BICUB
         img = T.Resize(size=(h, w), interpolation=imethod)(torch.Tensor(img))
         img = np.transpose(img.numpy(), (1, 2, 0))
     img = T.ToTensor()(img)  # (3, h, w)
+
+    # if inject == "CLOUD":
+        # img = inject_cloud(img)
+    # elif inject == "THICK_FOG":
+        # img = inject_thick_fog(img)
+    # elif inject == "THIN_FOG":
+        # img = inject_thick_fog(img)
+
     rgbs = img.view(3, -1).permute(1, 0)  # (h*w, 3)
     rgbs = rgbs.type(torch.FloatTensor)
     return rgbs
 
+def process_json(json_p, img_downscale, get_rays):
+    d = sat_utils.read_dict_from_json(json_p)
+    h, w = int(d["height"] // img_downscale), int(d["width"] // img_downscale)
+    rpc = sat_utils.rescale_rpc(rpcm.RPCModel(d["rpc"], dict_format="rpcm"), 1.0 / img_downscale)
+    min_alt, max_alt = float(d["min_alt"]), float(d["max_alt"])
+    cols, rows = np.meshgrid(np.arange(w), np.arange(h))
+    rays = get_rays(cols.flatten(), rows.flatten(), rpc, min_alt, max_alt)
+    return rays
+
 
 class SatelliteDataset(Dataset):
-    def __init__(self, root_dir, img_dir, split="train", img_downscale=1.0, cache_dir=None):
+    def __init__(self, root_dir, img_dir, split="train", img_downscale=1.0, cache_dir=None, add_cloud=False, cloud_first_n=0):
         """
         NeRF Satellite Dataset
         Args:
@@ -97,6 +136,8 @@ class SatelliteDataset(Dataset):
         self.train = split == "train"
         self.img_downscale = float(img_downscale)
         self.white_back = False
+        self.add_cloud = add_cloud
+        self.cloud_first_n = cloud_first_n
 
         assert os.path.exists(root_dir), f"root_dir {root_dir} does not exist"
         assert os.path.exists(img_dir), f"img_dir {img_dir} does not exist"
@@ -104,6 +145,7 @@ class SatelliteDataset(Dataset):
         # load scaling params
         if not os.path.exists(f"{self.json_dir}/scene.loc"):
             self.init_scaling_params()
+
         d = sat_utils.read_dict_from_json(os.path.join(self.json_dir, "scene.loc"))
         self.center = torch.tensor([float(d["X_offset"]), float(d["Y_offset"]), float(d["Z_offset"])])
         self.range = torch.max(torch.tensor([float(d["X_scale"]), float(d["Y_scale"]), float(d["Z_scale"])]))
@@ -135,16 +177,15 @@ class SatelliteDataset(Dataset):
     def init_scaling_params(self):
         print("Could not find a scene.loc file in the root directory, creating one...")
         print("Warning: this can take some minutes")
-        all_json = glob.glob("{}/*.json".format(self.json_dir))
-        all_rays = []
-        for json_p in all_json:
-            d = sat_utils.read_dict_from_json(json_p)
-            h, w = int(d["height"] // self.img_downscale), int(d["width"] // self.img_downscale)
-            rpc = sat_utils.rescale_rpc(rpcm.RPCModel(d["rpc"], dict_format="rpcm"), 1.0 / self.img_downscale)
-            min_alt, max_alt = float(d["min_alt"]), float(d["max_alt"])
-            cols, rows = np.meshgrid(np.arange(w), np.arange(h))
-            rays = get_rays(cols.flatten(), rows.flatten(), rpc, min_alt, max_alt)
-            all_rays += [rays]
+        all_json = glob.glob(f"{self.json_dir}/*.json")
+
+        # Create a partial function with fixed arguments
+        process_func = partial(process_json, img_downscale=self.img_downscale, get_rays=get_rays)
+
+        # Use multiprocessing to process JSON files in parallel
+        with mp.Pool() as pool:
+            all_rays = pool.map(process_func, all_json)
+
         all_rays = torch.cat(all_rays, 0)
         near_points = all_rays[:, :3]
         far_points = all_rays[:, :3] + all_rays[:, 7:8] * all_rays[:, 3:6]
@@ -156,6 +197,31 @@ class SatelliteDataset(Dataset):
         d["Z_scale"], d["Z_offset"] = sat_utils.rpc_scaling_params(all_points[:, 2])
         sat_utils.write_dict_to_json(d, f"{self.json_dir}/scene.loc")
         print("... done !")
+
+    # def init_scaling_params(self):
+    #     print("Could not find a scene.loc file in the root directory, creating one...")
+    #     print("Warning: this can take some minutes")
+    #     all_json = glob.glob("{}/*.json".format(self.json_dir))
+    #     all_rays = []
+    #     for json_p in all_json:
+    #         d = sat_utils.read_dict_from_json(json_p)
+    #         h, w = int(d["height"] // self.img_downscale), int(d["width"] // self.img_downscale)
+    #         rpc = sat_utils.rescale_rpc(rpcm.RPCModel(d["rpc"], dict_format="rpcm"), 1.0 / self.img_downscale)
+    #         min_alt, max_alt = float(d["min_alt"]), float(d["max_alt"])
+    #         cols, rows = np.meshgrid(np.arange(w), np.arange(h))
+    #         rays = get_rays(cols.flatten(), rows.flatten(), rpc, min_alt, max_alt)
+    #         all_rays += [rays]
+    #     all_rays = torch.cat(all_rays, 0)
+    #     near_points = all_rays[:, :3]
+    #     far_points = all_rays[:, :3] + all_rays[:, 7:8] * all_rays[:, 3:6]
+    #     all_points = torch.cat([near_points, far_points], 0)
+    #
+    #     d = {}
+    #     d["X_scale"], d["X_offset"] = sat_utils.rpc_scaling_params(all_points[:, 0])
+    #     d["Y_scale"], d["Y_offset"] = sat_utils.rpc_scaling_params(all_points[:, 1])
+    #     d["Z_scale"], d["Z_offset"] = sat_utils.rpc_scaling_params(all_points[:, 2])
+    #     sat_utils.write_dict_to_json(d, f"{self.json_dir}/scene.loc")
+    #     print("... done !")
 
     def load_data(self, json_files, verbose=False):
         """
@@ -179,7 +245,11 @@ class SatelliteDataset(Dataset):
             img_id = sat_utils.get_file_id(d["img"])
 
             # get rgb colors
-            rgbs = load_tensor_from_rgb_geotiff(img_p, self.img_downscale)
+            if t in range(0, self.cloud_first_n) and self.train and self.add_cloud:
+                print(f"Injecting cloud for image {img_p}")
+                rgbs = load_tensor_from_rgb_geotiff(img_p, self.img_downscale, inject="CLOUD")
+            else:
+                rgbs = load_tensor_from_rgb_geotiff(img_p, self.img_downscale)
 
             # get rays
             cache_path = "{}/{}.data".format(self.cache_dir, img_id)

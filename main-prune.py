@@ -1,26 +1,23 @@
 #!/bin/env python
-import faulthandler
-faulthandler.enable()
-
 import argparse
+
+import warnings
+
+from pruning import prune_depgraph
+import torch_pruning as tp
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 import torch
 import pytorch_lightning as pl
+
 from opt import get_opts
-print("import opt")
-
 from datasets import load_dataset, satellite
-print("import datasets")
-
 from metrics import load_loss, DepthLoss, SNerfLoss
-print("import metrics")
 from torch.utils.data import DataLoader
-print("import torch.utils.data")
 from collections import defaultdict
-print("import collections")
 
 from rendering import render_rays
-
 from models import load_model
 import train_utils
 import metrics
@@ -28,20 +25,18 @@ import os
 import numpy as np
 import datetime
 from sat_utils import compute_mae_and_save_dsm_diff
-print("sat_utils")
 
 from eval_satnerf import find_best_embbeding_for_val_image, save_nerf_output_to_images, predefined_val_ts, load_nerf
 
-# os.environ["CUDA_VISIBLE_DEVICES"] = "1, 2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1, 2"
 # pl.seed_everything(42)
 # pl.seed_everything(1000)
-print("before seed")
 pl.seed_everything(3407)
 
 class NeRF_pl(pl.LightningModule):
     """NeRF network"""
 
-    def __init__(self, args):
+    def __init__(self, args, models=None):
         super().__init__()
         self.args = args
 
@@ -51,7 +46,15 @@ class NeRF_pl(pl.LightningModule):
             # depth supervision will be used
             self.depth_loss = DepthLoss(lambda_ds=args.ds_lambda)
             self.ds_drop = np.round(args.ds_drop * args.max_train_steps)
-        self.define_models()
+
+        if models is not None:
+            self.models = models
+            print("Loaded existing models")
+            print(self.models)
+        else:
+            self.define_models()
+            print(self.models)
+
         self.val_im_dir = "{}/{}/val".format(args.logs_dir, args.exp_name)
         self.train_im_dir = "{}/{}/train".format(args.logs_dir, args.exp_name)
         self.train_steps = 0
@@ -73,7 +76,6 @@ class NeRF_pl(pl.LightningModule):
             self.models["t"] = self.embedding_t
 
     def forward(self, rays, ts):
-
         chunk_size = self.args.chunk
         batch_size = rays.shape[0]
 
@@ -95,6 +97,7 @@ class NeRF_pl(pl.LightningModule):
         self.val_dataset = [] + load_dataset(self.args, split="val")
 
     def configure_optimizers(self):
+
         parameters = train_utils.get_parameters(self.models)
         self.optimizer = torch.optim.Adam(parameters, lr=self.args.lr, weight_decay=0)
 
@@ -175,7 +178,6 @@ class NeRF_pl(pl.LightningModule):
         rgbs = rgbs.squeeze()  # (H*W, 3)
         if self.args.model == "sat-nerf":
             t = predefined_val_ts(batch["src_id"][0])
-            # t = predefined_val_ts(batch["src_id"][1])
             ts = t * torch.ones(rays.shape[0], 1).long().cuda().squeeze()
         else:
             ts = None
@@ -191,7 +193,6 @@ class NeRF_pl(pl.LightningModule):
             W, H = batch["w"], batch["h"]
         else:
             W = H = int(torch.sqrt(torch.tensor(rays.shape[0]).float())) # assume squared images
-
         img = results[f'rgb_{typ}'].view(H, W, 3).permute(2, 0, 1).cpu()  # (3, H, W)
         img_gt = rgbs.view(H, W, 3).permute(2, 0, 1).cpu()  # (3, H, W)
         depth = train_utils.visualize_depth(results[f'depth_{typ}'].view(H, W))  # (3, H, W)
@@ -250,14 +251,26 @@ class NeRF_pl(pl.LightningModule):
         return train_utils.get_epoch_number_from_train_step(tstep, len(self.train_dataset[0]), self.args.batch_size)
 
 def main():
+    # ckpt_path = "exps/JAX_416_sat-nerf_16layers/checkpoints/2024-01-23_01-53-42_JAX_416_sat-nerf_16layers/epoch=23.ckpt"
 
-    print("before empty cache")
     torch.cuda.empty_cache()
-    print("after empty cache")
     args = get_opts()
-    # print(args)
-    system = NeRF_pl(args)
-    print(system)
+
+    base_dir = "exps"
+    run_id = "2024-01-23_01-53-42_JAX_416_sat-nerf_16layers"
+    project_dir = "JAX_416_sat-nerf_16layers"
+    logs_dir = f"{base_dir}/{project_dir}/logs"
+    checkpoints_dir = f"{base_dir}/{project_dir}/checkpoints"
+    epoch_number = 24
+    models = load_nerf(run_id, logs_dir, checkpoints_dir, epoch_number - 1)
+    print(args.prune_ratio)
+    prune_depgraph(models["coarse"], tp.importance.GroupNormImportance(p=1), "sat-nerf", ratio=args.prune_ratio)
+    models["coarse"].cuda().train()
+
+    # print()
+    # for p in models["coarse"].parameters():
+    #     print(p.requires_grad)
+    system = NeRF_pl(args, models)
 
     logger = pl.loggers.TensorBoardLogger(save_dir=args.logs_dir, name=args.exp_name, default_hp_metric=False)
 
@@ -272,7 +285,7 @@ def main():
                          logger=logger,
                          callbacks=[ckpt_callback],
                          resume_from_checkpoint=args.ckpt_path,
-                         gpus=[args.gpu_id],
+                         gpus=1,
                          auto_select_gpus=False,
                          deterministic=True,
                          benchmark=True,

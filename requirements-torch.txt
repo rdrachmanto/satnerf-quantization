@@ -1,0 +1,6 @@
+pytorch-lightning==1.3.7
+torch==1.7.1+cu110
+torch-pruning==1.3.6
+torchaudio==0.7.2
+torchmetrics==0.6.0
+torchvision==0.8.2+cu110

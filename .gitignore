@@ -3,3 +3,9 @@ __pycache__
 logs
 checkpoints
 .ipynb_checkpoints
+*.engine
+*.onnx
+datasets/DFC2019
+datasets/root_dir
+datasets/cache_dir
+train*.sh

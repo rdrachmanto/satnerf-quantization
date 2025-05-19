@@ -7,7 +7,7 @@ import json
 import train_utils
 from models import load_model
 from datasets import SatelliteDataset
-from rendering import render_rays
+from rendering_trt import render_rays
 from collections import defaultdict
 import metrics
 import numpy as np
@@ -21,6 +21,8 @@ import warnings
 warnings.filterwarnings("ignore")
 
 #os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1"
+from polygraphy.backend.common import BytesFromPath
+from polygraphy.backend.trt import EngineFromBytes, TrtRunner
 
 def extract_model_state_dict(ckpt_path, model_name='model', prefixes_to_ignore=[]):
     checkpoint = torch.load(ckpt_path, map_location=torch.device('cpu'))
@@ -52,7 +54,8 @@ def load_ckpt(model, ckpt_path, model_name='model', prefixes_to_ignore=[]):
     model.load_state_dict(model_dict)
 
 @torch.no_grad()
-def batched_inference(models, rays, ts, args):
+# def batched_inference(models, rays, ts, args):
+def batched_inference(models, runner, rays, ts, args):
     """Do batched inference on rays using chunk."""
     chunk_size = args.chunk
     batch_size = rays.shape[0]
@@ -66,11 +69,12 @@ def batched_inference(models, rays, ts, args):
         # print(i+chunk_size)
         rendered_ray_chunks = \
             render_rays(models,
+                        runner,
                         args,
                         rays[i:i + chunk_size],
                         ts[i:i + chunk_size] if ts is not None else None)
         # print("[eval_satnerf.batched_inference:64] rendered_ray_chunks.keys(): ", rendered_ray_chunks.keys())
-        
+
         for k, v in rendered_ray_chunks.items():
             results[k] += [v]
         # break
@@ -90,7 +94,7 @@ def load_nerf(run_id, logs_dir, ckpts_dir, epoch_number):
         args = argparse.Namespace(**json.load(f))
 
     # checkpoint_path = os.path.join(ckpts_dir, "{}/epoch={}.ckpt".format(run_id, epoch_number))
-    # checkpoint_path = 
+    # checkpoint_path =
     checkpoint_path = os.path.join("{}/epoch={}.ckpt".format(ckpts_dir, epoch_number))
     print(checkpoint_path)
     print("Using", checkpoint_path)
@@ -99,19 +103,21 @@ def load_nerf(run_id, logs_dir, ckpts_dir, epoch_number):
 
     # load models
     models = {}
-    nerf_coarse = load_model(args)
-    load_ckpt(nerf_coarse, checkpoint_path, model_name='nerf_coarse')
+    # nerf_coarse = load_model(args)
+    # load_ckpt(nerf_coarse, checkpoint_path, model_name='nerf_coarse')
 
-    models["coarse"] = nerf_coarse.cuda().eval()
+    # models["coarse"] = nerf_coarse.cuda().eval()
 
-    if args.n_importance > 0:
-        nerf_fine = load_model(args)
-        load_ckpt(nerf_coarse, checkpoint_path, model_name='nerf_fine')
-        models['fine'] = nerf_fine.cuda().eval()
+    # if args.n_importance > 0:
+    #     nerf_fine = load_model(args)
+    #     load_ckpt(nerf_coarse, checkpoint_path, model_name='nerf_fine')
+    #     models['fine'] = nerf_fine.cuda().eval()
     if args.model == "sat-nerf":
         embedding_t = torch.nn.Embedding(args.t_embbeding_vocab, args.t_embbeding_tau)
         load_ckpt(embedding_t, checkpoint_path, model_name='embedding_t')
         models["t"] = embedding_t.cuda().eval()
+
+    models["trt"] = EngineFromBytes(BytesFromPath("/data/rdr78068/satnerf-base/model_int8.engine"))
 
     return models
 
@@ -136,18 +142,17 @@ def save_nerf_output_to_images(dataset, sample, results, out_dir, epoch_number):
     out_path = "{}/depth/{}_epoch{}.tif".format(out_dir, src_id, epoch_number)
     train_utils.save_output_image(alts.reshape(1, H, W), out_path, src_path)
     # save dsm
-    # out_path = "{}/dsm/{}_epoch{}.tif".format(out_dir, src_id, epoch_number)
-    out_path="/data/rdr78068/dsm/dsm.tif"
+    out_path = "{}/dsm/{}_epoch{}.tif".format(out_dir, src_id, epoch_number)
+    # out_path="/data/rdr78068/dsm/dsm_int8.tif"
     dsm = dataset.get_dsm_from_nerf_prediction(rays.cpu(), depth.cpu(), dsm_path=out_path)
     # save rgb image
-    # out_path = "{}/rgb/{}_epoch{}.tif".format(out_dir, src_id, epoch_number)
-    out_path="/data/rdr78068/rgb/rgb.tif"
+    out_path = "{}/rgb/{}_epoch{}.tif".format(out_dir, src_id, epoch_number)
+    # out_path="/data/rdr78068/rgb/rgb_int8.tif"
     train_utils.save_output_image(img, out_path, src_path)
     # save gt rgb image
-    # out_path = "{}/gt_rgb/{}_epoch{}.tif".format(out_dir, src_id, epoch_number)
+    out_path = "{}/gt_rgb/{}_epoch{}.tif".format(out_dir, src_id, epoch_number)
     # out_path = ".tif".format(out_dir, src_id, epoch_number)
-    out_path="/data/rdr78068/gtd/gtd.tif"
-    train_utils.save_output_image(img_gt, out_path, src_path)
+    # out_path="/data/rdr78068/gtd/gtd_int8.tif"
     # save shadow modelling images
     if f"sun_{typ}" in results:
         s_v = torch.sum(results[f"weights_{typ}"].unsqueeze(-1) * results[f'sun_{typ}'], -2)
@@ -213,6 +218,7 @@ def find_best_embeddings_for_val_dataset(val_dataset, models, conf, train_indice
 def predefined_val_ts(img_id):
 
     aoi_id = img_id[:7]
+
     if aoi_id == "JAX_068":
         d = {"JAX_068_013_RGB": 0,
              "JAX_068_002_RGB": 8,
@@ -381,63 +387,94 @@ def eval_aoi(run_id, logs_dir, output_dir, epoch_number, split, checkpoints_dir=
 
     psnr, ssim, mae = [], [], []
 
-    for i in samples_to_eval:
-        sample = dataset[i]
-        rays, rgbs = sample["rays"].cuda(), sample["rgbs"]
-        rays = rays.squeeze()  # (H*W, 3)
-        rgbs = rgbs.squeeze()  # (H*W, 3)
-        src_id  = sample["src_id"]
-        if "h" in sample and "w" in sample:
-            W, H = sample["w"], sample["h"]
-        else:
-            W = H = int(torch.sqrt(torch.tensor(rays.shape[0]).float()))
 
-        ts = None
-        if args.model == "sat-nerf":
-            if split == "val":
-                t = predefined_val_ts(src_id)
-                ts = t * torch.ones(rays.shape[0], 1).long().cuda().squeeze()
+    with TrtRunner(models["trt"]) as runner:
+        print("Warmup stage")
+        for i in samples_to_eval:
+            sample = dataset[i]
+            rays, rgbs = sample["rays"].cuda(), sample["rgbs"]
+            rays = rays.squeeze()  # (H*W, 3)
+            rgbs = rgbs.squeeze()  # (H*W, 3)
+            src_id  = sample["src_id"]
+            if "h" in sample and "w" in sample:
+                W, H = sample["w"], sample["h"]
             else:
-                ts = sample["ts"].cuda().squeeze()
+                W = H = int(torch.sqrt(torch.tensor(rays.shape[0]).float()))
 
-        start = time.perf_counter()
-        results = batched_inference(models, rays, ts, args)
-        end = time.perf_counter()
-        print("Inference time: ", end-start)
+            ts = None
+            if args.model == "sat-nerf":
+                if split == "val":
+                    t = predefined_val_ts(src_id)
+                    ts = t * torch.ones(rays.shape[0], 1).long().cuda().squeeze()
+                else:
+                    ts = sample["ts"].cuda().squeeze()
 
-        for k in sample.keys():
-            if torch.is_tensor(sample[k]):
-                sample[k] = sample[k].unsqueeze(0)
+            start = time.perf_counter()
+            _ = batched_inference(models, runner, rays, ts, args)
+            end = time.perf_counter()
+            print("Warmup time: ", end-start)
+            
+
+
+        print("Inference...")
+        for i in samples_to_eval:
+            sample = dataset[i]
+            rays, rgbs = sample["rays"].cuda(), sample["rgbs"]
+            rays = rays.squeeze()  # (H*W, 3)
+            rgbs = rgbs.squeeze()  # (H*W, 3)
+            src_id  = sample["src_id"]
+            if "h" in sample and "w" in sample:
+                W, H = sample["w"], sample["h"]
             else:
-                sample[k] = [sample[k]]
-        out_dir = os.path.join(output_dir, run_id, split)
-        os.makedirs(out_dir, exist_ok=True)
-        save_nerf_output_to_images(dataset, sample, results, out_dir, epoch_number)
+                W = H = int(torch.sqrt(torch.tensor(rays.shape[0]).float()))
 
-        # image metrics
-        typ = "fine" if "rgb_fine" in results else "coarse"
-        psnr_ = metrics.psnr(results[f"rgb_{typ}"].cpu(), rgbs.cpu())
-        psnr.append(psnr_)
-        ssim_ = metrics.ssim(results[f"rgb_{typ}"].view(1, 3, H, W).cpu(), rgbs.view(1, 3, H, W).cpu())
-        ssim.append(ssim_)
+            ts = None
+            if args.model == "sat-nerf":
+                if split == "val":
+                    t = predefined_val_ts(src_id)
+                    ts = t * torch.ones(rays.shape[0], 1).long().cuda().squeeze()
+                else:
+                    ts = sample["ts"].cuda().squeeze()
 
-        # geometry metrics
-        pred_dsm_path = "{}/dsm/{}_epoch{}.tif".format(out_dir, src_id, epoch_number)
-        mae_ = sat_utils.compute_mae_and_save_dsm_diff(pred_dsm_path, src_id, args.gt_dir, out_dir, epoch_number)
-        mae.append(mae_)
-        print("{}: pnsr {:.3f} / ssim {:.3f} / mae {:.3f}".format(src_id, psnr_, ssim_, mae_))
+            start = time.perf_counter()
+            results = batched_inference(models, runner, rays, ts, args)
+            end = time.perf_counter()
+            
+            print("Inference time: ", end-start)
 
-        # clean files
-        in_tmp_path = glob.glob(os.path.join(out_dir, "*rdsm_epoch*.tif"))[0]
-        out_tmp_path = in_tmp_path.replace(out_dir, os.path.join(out_dir, "rdsm"))
-        os.makedirs(os.path.dirname(out_tmp_path), exist_ok=True)
-        shutil.copyfile(in_tmp_path, out_tmp_path)
-        os.remove(in_tmp_path)
-        in_tmp_path = glob.glob(os.path.join(out_dir, "*rdsm_diff_epoch*.tif"))[0]
-        out_tmp_path = in_tmp_path.replace(out_dir, os.path.join(out_dir, "rdsm_diff"))
-        os.makedirs(os.path.dirname(out_tmp_path), exist_ok=True)
-        shutil.copyfile(in_tmp_path, out_tmp_path)
-        os.remove(in_tmp_path)
+            for k in sample.keys():
+                if torch.is_tensor(sample[k]):
+                    sample[k] = sample[k].unsqueeze(0)
+                else:
+                    sample[k] = [sample[k]]
+            out_dir = os.path.join(output_dir, run_id, split)
+            os.makedirs(out_dir, exist_ok=True)
+            save_nerf_output_to_images(dataset, sample, results, out_dir, epoch_number)
+
+            # image metrics
+            typ = "fine" if "rgb_fine" in results else "coarse"
+            psnr_ = metrics.psnr(results[f"rgb_{typ}"].cpu(), rgbs.cpu())
+            psnr.append(psnr_)
+            ssim_ = metrics.ssim(results[f"rgb_{typ}"].view(1, 3, H, W).cpu(), rgbs.view(1, 3, H, W).cpu())
+            ssim.append(ssim_)
+
+            # geometry metrics
+            pred_dsm_path = "{}/dsm/{}_epoch{}.tif".format(out_dir, src_id, epoch_number)
+            mae_ = sat_utils.compute_mae_and_save_dsm_diff(pred_dsm_path, src_id, args.gt_dir, out_dir, epoch_number)
+            mae.append(mae_)
+            print("{}: pnsr {:.3f} / ssim {:.3f} / mae {:.3f}".format(src_id, psnr_, ssim_, mae_))
+
+            # clean files
+            in_tmp_path = glob.glob(os.path.join(out_dir, "*rdsm_epoch*.tif"))[0]
+            out_tmp_path = in_tmp_path.replace(out_dir, os.path.join(out_dir, "rdsm"))
+            os.makedirs(os.path.dirname(out_tmp_path), exist_ok=True)
+            shutil.copyfile(in_tmp_path, out_tmp_path)
+            os.remove(in_tmp_path)
+            in_tmp_path = glob.glob(os.path.join(out_dir, "*rdsm_diff_epoch*.tif"))[0]
+            out_tmp_path = in_tmp_path.replace(out_dir, os.path.join(out_dir, "rdsm_diff"))
+            os.makedirs(os.path.dirname(out_tmp_path), exist_ok=True)
+            shutil.copyfile(in_tmp_path, out_tmp_path)
+            os.remove(in_tmp_path)
 
     # Example chunk size (from args.chunk)
     # device = "cuda:0"
@@ -446,16 +483,16 @@ def eval_aoi(run_id, logs_dir, output_dir, epoch_number, split, checkpoints_dir=
     # input_direction = torch.zeros((1310720, 3), dtype=torch.float32, device=device)  # Dummy zeros tensor for ONNX conversion
     # input_sun_direction = torch.randn((1310720, 3), dtype=torch.float32, device=device)
     # input_t = torch.randn((1310720, 4), dtype=torch.float32, device=device)
-    
-    # # Prepare inputs as a tuple (ONNX requires positional arguments)
+
+    # Prepare inputs as a tuple (ONNX requires positional arguments)
     # example_inputs = (input_xyz, input_direction, input_sun_direction, input_t)
 
     # start = time.time()
     # torch.onnx.export(
-    #     models["coarse"], 
+    #     models["coarse"],
     #     example_inputs,
     #     "model.onnx",  # Output ONNX file
-    #     input_names=["input_xyz", "input_dir", "input_sun_dir", "input_t"], 
+    #     input_names=["input_xyz", "input_dir", "input_sun_dir", "input_t"],
     #     output_names=["output"],
     #     dynamic_axes={
     #         "input_xyz": {0: "num_points"},
@@ -469,10 +506,10 @@ def eval_aoi(run_id, logs_dir, output_dir, epoch_number, split, checkpoints_dir=
     # delta = time.time() - start
     # print(f"ONNX conversion: {delta}")
 
-    # print("\nMean PSNR: {:.3f}".format(np.mean(np.array(psnr))))
-    # print("Mean SSIM: {:.3f}".format(np.mean(np.array(ssim))))
-    # print("Mean MAE: {:.3f}\n".format(np.mean(np.array(mae))))
-    # return np.mean(np.array(psnr)), np.mean(np.array(ssim)), np.mean(np.array(mae))
+    print("\nMean PSNR: {:.3f}".format(np.mean(np.array(psnr))))
+    print("Mean SSIM: {:.3f}".format(np.mean(np.array(ssim))))
+    print("Mean MAE: {:.3f}\n".format(np.mean(np.array(mae))))
+    return np.mean(np.array(psnr)), np.mean(np.array(ssim)), np.mean(np.array(mae))
 
 # if __name__ == '__main__':
 #     import fire
@@ -499,7 +536,6 @@ def eval_aoi(run_id, logs_dir, output_dir, epoch_number, split, checkpoints_dir=
 #     with open(f"eval-mae-checkpoint/{run_id}/metrics.txt", "w") as f:
 #         f.write("\n".join(eval_metrics))
 #
-
 
 if __name__ == "__main__":
     run_id = "/data/exp-all/JAX_260_ds1_2gpu_batch4096_satnerf/"

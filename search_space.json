@@ -1,0 +1,7 @@
+{
+    "layers": {"_type": "choice", "_value": [6, 8, 10, 4]},
+    "feat": {"_type": "choice", "_value": [128, 256, 64]},
+    "lr": {"_type": "choice", "_value": [5e-4, 1e-4, 2e-4]},
+    "std": {"_type": "choice", "_value": [0.0, 0.12, 0.14]},
+    "n_samples": {"_type": "choice", "_value": [64, 32, 16, 72]}
+}
