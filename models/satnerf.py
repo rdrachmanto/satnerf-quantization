@@ -95,7 +95,7 @@ def inference_trt(runner, args, rays_xyz, z_vals, rays_d=None, sun_d=None, rays_
               'sun': sun_v,
               'sky': sky_rgb,
               'beta': uncertainty}
-    return result
+    return result 
 
 
 def inference(model, args, rays_xyz, z_vals, rays_d=None, sun_d=None, rays_t=None):
@@ -133,6 +133,14 @@ def inference(model, args, rays_xyz, z_vals, rays_d=None, sun_d=None, rays_t=Non
     # the input batch is split in chunks to avoid possible problems with memory usage
     chunk = args.chunk
     batch_size = xyz_.shape[0]
+
+    metadata = {
+        "shape": {
+            "input_xyz": xyz_.shape,
+            "input_sun_dir": sun_d_.shape,
+            "input_t": rays_t_.shape
+        }
+    }
 
     # # run model
     # out_chunks = []
@@ -192,7 +200,9 @@ def inference(model, args, rays_xyz, z_vals, rays_d=None, sun_d=None, rays_t=Non
               'sun': sun_v,
               'sky': sky_rgb,
               'beta': uncertainty}
-    return result
+    
+    return result, metadata
+
 
 class SatNeRF(torch.nn.Module):
     def __init__(self, layers=8, feat=256, mapping=False, mapping_sizes=[10, 4], skips=[4], siren=True, t_embedding_dims=16):

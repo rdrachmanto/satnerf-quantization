@@ -16,6 +16,15 @@ import train_utils
 import argparse
 import glob
 import shutil
+from polygraphy.backend.trt import (
+    CreateConfig, 
+    Calibrator,
+    SaveEngine, 
+    NetworkFromOnnxPath, 
+    EngineFromNetwork,
+    Profile
+)
+from polygraphy.comparator.data_loader import DataLoader
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -59,12 +68,13 @@ def batched_inference(models, rays, ts, args):
     # print("[eval_satnerf.batched_inference:53] chunk_size, batch_size, rays.shape, ts", chunk_size, batch_size, rays.shape, ts)
 
     results = defaultdict(list)
+    metadata = None
     # for range(0, 489999, 81920)
     for i in range(0, batch_size, chunk_size):
         # print(f"[eval_satnerf.batched_inference:58] render_rays(models, args, ray[{i}:{i + chunk_size}], None)")
         # print(i)
         # print(i+chunk_size)
-        rendered_ray_chunks = \
+        rendered_ray_chunks, metadata = \
             render_rays(models,
                         args,
                         rays[i:i + chunk_size],
@@ -81,7 +91,7 @@ def batched_inference(models, rays, ts, args):
         else:
             results[k] = torch.cat(v, 0)
 
-    return results
+    return results, metadata
 
 def load_nerf(run_id, logs_dir, ckpts_dir, epoch_number):
 
@@ -338,7 +348,74 @@ def predefined_val_ts(img_id):
 # $dataset_dir/DFC2019/Track3-RGB-crops/JAX_068 -> img_dir
 # $dataset_dir/DFC2019/Track3-Truth -> gt_dir
 
-def eval_aoi(run_id, logs_dir, output_dir, epoch_number, split, checkpoints_dir=None, root_dir=None, img_dir=None, gt_dir=None):
+
+def generate_onnx(model, metadata):
+    device = "cuda:0"
+    input_xyz = torch.randn(metadata["shape"]["input_xyz"], dtype=torch.float32, device=device)
+    # input_direction = None  # Originally there is no input_direction parameter
+    input_direction = torch.zeros(metadata["shape"]["input_xyz"], dtype=torch.float32, device=device)  # Dummy zeros tensor for ONNX conversion
+    input_sun_direction = torch.randn(metadata["shape"]["input_sun_dir"], dtype=torch.float32, device=device)
+    input_t = torch.randn(metadata["shape"]["input_t"], dtype=torch.float32, device=device)
+
+    print(f"ONNX Conversion with the below shapes:")
+    print(f"xyz_:\t\t\t{metadata['shape']['input_xyz']}")
+    print(f"direction (zeroes):\t{metadata['shape']['input_xyz']}")
+    print(f"sun direction:\t\t{metadata['shape']['input_sun_dir']}")
+    print(f"input t:\t\t{metadata['shape']['input_t']}")
+    
+    # # Prepare inputs as a tuple (ONNX requires positional arguments)
+    example_inputs = (input_xyz, input_direction, input_sun_direction, input_t)
+
+    start = time.time()
+    torch.onnx.export(
+        model, 
+        example_inputs,
+        "generated/model.onnx",  # Output ONNX file
+        input_names=["input_xyz", "input_dir", "input_sun_dir", "input_t"], 
+        output_names=["output"],
+        dynamic_axes={
+            "input_xyz": {0: "num_points"},
+            "input_dir": {0: "num_points"},
+            "input_sun_dir": {0: "num_points"},
+            "input_t": {0: "num_points"},
+            "output": {0: "num_points"}
+        },
+    )
+
+    delta = time.time() - start
+    print(f"ONNX conversion: {delta}")
+
+
+def generate_trt(onnx_path, metadata, save_to, fp16=False, int8=False):
+    profile = Profile()
+
+    for key,value in metadata["shape"].items():
+        value = list(value)
+        profile.add(name=key, opt=value, max=value, min=[1, value[-1]])  # TODO: might need a change
+    
+    calibrator = None
+    if int8:
+        dataloader = DataLoader(
+            seed=42, 
+            iterations=5,
+            int_range=(1,25),
+            float_range=(-1.0, 1.0),
+            val_range=(0.0, 1.0)
+        )
+
+        calibrator = Calibrator(dataloader)
+
+    build_engine = EngineFromNetwork(
+        NetworkFromOnnxPath(onnx_path),
+        config=CreateConfig(fp16=fp16, int8=int8, profiles = [profile], calibrator=calibrator)
+    )
+
+    build_engine = SaveEngine(build_engine, path=save_to)
+    build_engine()
+    print("TensorRT engine conversion done!")
+
+
+def eval_aoi(run_id, logs_dir, output_dir, epoch_number, split, checkpoints_dir=None, root_dir=None, img_dir=None, gt_dir=None, save_onnx=False):
     with open('{}/opts.json'.format(os.path.join(run_id, logs_dir)), 'r') as f:
         args = argparse.Namespace(**json.load(f))
         print(args)
@@ -401,7 +478,7 @@ def eval_aoi(run_id, logs_dir, output_dir, epoch_number, split, checkpoints_dir=
                 ts = sample["ts"].cuda().squeeze()
 
         start = time.perf_counter()
-        results = batched_inference(models, rays, ts, args)
+        results, metadata = batched_inference(models, rays, ts, args)
         end = time.perf_counter()
         print("Inference time: ", end-start)
 
@@ -439,40 +516,16 @@ def eval_aoi(run_id, logs_dir, output_dir, epoch_number, split, checkpoints_dir=
         shutil.copyfile(in_tmp_path, out_tmp_path)
         os.remove(in_tmp_path)
 
-    # Example chunk size (from args.chunk)
-    # device = "cuda:0"
-    # input_xyz = torch.randn((1310720, 3), dtype=torch.float32, device=device)
-    # # input_direction = None  # Originally there is no input_direction parameter
-    # input_direction = torch.zeros((1310720, 3), dtype=torch.float32, device=device)  # Dummy zeros tensor for ONNX conversion
-    # input_sun_direction = torch.randn((1310720, 3), dtype=torch.float32, device=device)
-    # input_t = torch.randn((1310720, 4), dtype=torch.float32, device=device)
-    
-    # # Prepare inputs as a tuple (ONNX requires positional arguments)
-    # example_inputs = (input_xyz, input_direction, input_sun_direction, input_t)
 
-    # start = time.time()
-    # torch.onnx.export(
-    #     models["coarse"], 
-    #     example_inputs,
-    #     "model.onnx",  # Output ONNX file
-    #     input_names=["input_xyz", "input_dir", "input_sun_dir", "input_t"], 
-    #     output_names=["output"],
-    #     dynamic_axes={
-    #         "input_xyz": {0: "num_points"},
-    #         "input_dir": {0: "num_points"},
-    #         "input_sun_dir": {0: "num_points"},
-    #         "input_t": {0: "num_points"},
-    #         "output": {0: "num_points"}
-    #     },
-    # )
+    print("\nMean PSNR: {:.3f}".format(np.mean(np.array(psnr))))
+    print("Mean SSIM: {:.3f}".format(np.mean(np.array(ssim))))
+    print("Mean MAE: {:.3f}\n".format(np.mean(np.array(mae))))
 
-    # delta = time.time() - start
-    # print(f"ONNX conversion: {delta}")
+    if save_onnx:
+        generate_onnx(models["coarse"], metadata)
+        generate_trt("./generated/model.onnx", metadata, int8=True, save_to="./generated/model-int8.engine")
 
-    # print("\nMean PSNR: {:.3f}".format(np.mean(np.array(psnr))))
-    # print("Mean SSIM: {:.3f}".format(np.mean(np.array(ssim))))
-    # print("Mean MAE: {:.3f}\n".format(np.mean(np.array(mae))))
-    # return np.mean(np.array(psnr)), np.mean(np.array(ssim)), np.mean(np.array(mae))
+    return np.mean(np.array(psnr)), np.mean(np.array(ssim)), np.mean(np.array(mae)),
 
 # if __name__ == '__main__':
 #     import fire
@@ -508,4 +561,5 @@ if __name__ == "__main__":
     split = "val"
     output_dir = "./exps-eval"
 
-    eval_aoi(run_id, logs_dir, output_dir, epoch_number, split)
+    eval_aoi(run_id, logs_dir, output_dir, epoch_number, split, save_onnx=True)
+

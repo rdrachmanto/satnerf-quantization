@@ -59,6 +59,8 @@ def render_rays(models, args, rays, ts):
     variant = args.model
     use_disp = False
     perturb = 1.0
+
+    metadata = None
     # print("[rendering.render_rays:60] N_samples, N_importance, variant, use_disp, perturb:", N_samples, N_importance, variant, use_disp, perturb)
 
     # get rays, initial shape is (471228, 11)
@@ -106,7 +108,7 @@ def render_rays(models, args, rays, ts):
         sun_d = rays[:, 8:11]
         rays_t = models['t'](ts) if ts is not None else None
         # start = time.time()
-        result = inference(models[typ], args, xyz_coarse, z_vals, rays_d=None, sun_d=sun_d, rays_t=rays_t)
+        result, metadata = inference(models[typ], args, xyz_coarse, z_vals, rays_d=None, sun_d=sun_d, rays_t=rays_t)
         # print("[rendering.render_rays:99] Inference time: ", (time.time() - start) * 1000)
 
         if args.sc_lambda > 0:
@@ -166,4 +168,4 @@ def render_rays(models, args, rays, ts):
         for k in result.keys():
             result_["{}_{}".format(k, typ)] = result[k]
 
-    return result_
+    return result_, metadata
