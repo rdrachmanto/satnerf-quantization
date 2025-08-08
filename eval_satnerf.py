@@ -17,10 +17,10 @@ import argparse
 import glob
 import shutil
 from polygraphy.backend.trt import (
-    CreateConfig, 
+    CreateConfig,
     Calibrator,
-    SaveEngine, 
-    NetworkFromOnnxPath, 
+    SaveEngine,
+    NetworkFromOnnxPath,
     EngineFromNetwork,
     Profile
 )
@@ -80,7 +80,7 @@ def batched_inference(models, rays, ts, args):
                         rays[i:i + chunk_size],
                         ts[i:i + chunk_size] if ts is not None else None)
         # print("[eval_satnerf.batched_inference:64] rendered_ray_chunks.keys(): ", rendered_ray_chunks.keys())
-        
+
         for k, v in rendered_ray_chunks.items():
             results[k] += [v]
         # break
@@ -100,7 +100,7 @@ def load_nerf(run_id, logs_dir, ckpts_dir, epoch_number):
         args = argparse.Namespace(**json.load(f))
 
     # checkpoint_path = os.path.join(ckpts_dir, "{}/epoch={}.ckpt".format(run_id, epoch_number))
-    # checkpoint_path = 
+    # checkpoint_path =
     checkpoint_path = os.path.join("{}/epoch={}.ckpt".format(ckpts_dir, epoch_number))
     print(checkpoint_path)
     print("Using", checkpoint_path)
@@ -146,17 +146,17 @@ def save_nerf_output_to_images(dataset, sample, results, out_dir, epoch_number):
     out_path = "{}/depth/{}_epoch{}.tif".format(out_dir, src_id, epoch_number)
     train_utils.save_output_image(alts.reshape(1, H, W), out_path, src_path)
     # save dsm
-    # out_path = "{}/dsm/{}_epoch{}.tif".format(out_dir, src_id, epoch_number)
-    out_path="/data/rdr78068/dsm/dsm.tif"
+    out_path = "{}/dsm/{}_epoch{}.tif".format(out_dir, src_id, epoch_number)
+    # out_path="/data/rdr78068/dsm/dsm.tif"
     dsm = dataset.get_dsm_from_nerf_prediction(rays.cpu(), depth.cpu(), dsm_path=out_path)
     # save rgb image
-    # out_path = "{}/rgb/{}_epoch{}.tif".format(out_dir, src_id, epoch_number)
-    out_path="/data/rdr78068/rgb/rgb.tif"
+    out_path = "{}/rgb/{}_epoch{}.tif".format(out_dir, src_id, epoch_number)
+    # out_path="/data/rdr78068/rgb/rgb.tif"
     train_utils.save_output_image(img, out_path, src_path)
     # save gt rgb image
-    # out_path = "{}/gt_rgb/{}_epoch{}.tif".format(out_dir, src_id, epoch_number)
+    out_path = "{}/gt_rgb/{}_epoch{}.tif".format(out_dir, src_id, epoch_number)
     # out_path = ".tif".format(out_dir, src_id, epoch_number)
-    out_path="/data/rdr78068/gtd/gtd.tif"
+    # out_path="/data/rdr78068/gtd/gtd.tif"
     train_utils.save_output_image(img_gt, out_path, src_path)
     # save shadow modelling images
     if f"sun_{typ}" in results:
@@ -349,29 +349,35 @@ def predefined_val_ts(img_id):
 # $dataset_dir/DFC2019/Track3-Truth -> gt_dir
 
 
-def generate_onnx(model, metadata):
+def generate_onnx(model):
     device = "cuda:0"
-    input_xyz = torch.randn(metadata["shape"]["input_xyz"], dtype=torch.float32, device=device)
-    # input_direction = None  # Originally there is no input_direction parameter
-    input_direction = torch.zeros(metadata["shape"]["input_xyz"], dtype=torch.float32, device=device)  # Dummy zeros tensor for ONNX conversion
-    input_sun_direction = torch.randn(metadata["shape"]["input_sun_dir"], dtype=torch.float32, device=device)
-    input_t = torch.randn(metadata["shape"]["input_t"], dtype=torch.float32, device=device)
+    # input_xyz = torch.randn(metadata["shape"]["input_xyz"], dtype=torch.float32, device=device)
+    # # input_direction = None  # Originally there is no input_direction parameter
+    # input_direction = torch.zeros(metadata["shape"]["input_xyz"], dtype=torch.float32, device=device)  # Dummy zeros tensor for ONNX conversion
+    # input_sun_direction = torch.randn(metadata["shape"]["input_sun_dir"], dtype=torch.float32, device=device)
+    # input_t = torch.randn(metadata["shape"]["input_t"], dtype=torch.float32, device=device)
 
-    print(f"ONNX Conversion with the below shapes:")
-    print(f"xyz_:\t\t\t{metadata['shape']['input_xyz']}")
-    print(f"direction (zeroes):\t{metadata['shape']['input_xyz']}")
-    print(f"sun direction:\t\t{metadata['shape']['input_sun_dir']}")
-    print(f"input t:\t\t{metadata['shape']['input_t']}")
-    
+    input_xyz = torch.randn((1310720, 3), dtype=torch.float32, device=device)
+    # input_direction = None  # Originally there is no input_direction parameter
+    input_direction = torch.zeros((1310720, 3), dtype=torch.float32, device=device)  # Dummy zeros tensor for ONNX conversion
+    input_sun_direction = torch.randn((1310720, 3), dtype=torch.float32, device=device)
+    input_t = torch.randn((1310720, 4), dtype=torch.float32, device=device)
+
+    # print(f"ONNX Conversion with the below shapes:")
+    # print(f"xyz_:\t\t\t{metadata['shape']['input_xyz']}")
+    # print(f"direction (zeroes):\t{metadata['shape']['input_xyz']}")
+    # print(f"sun direction:\t\t{metadata['shape']['input_sun_dir']}")
+    # print(f"input t:\t\t{metadata['shape']['input_t']}")
+
     # # Prepare inputs as a tuple (ONNX requires positional arguments)
     example_inputs = (input_xyz, input_direction, input_sun_direction, input_t)
 
     start = time.time()
     torch.onnx.export(
-        model, 
+        model,
         example_inputs,
         "generated/model.onnx",  # Output ONNX file
-        input_names=["input_xyz", "input_dir", "input_sun_dir", "input_t"], 
+        input_names=["input_xyz", "input_dir", "input_sun_dir", "input_t"],
         output_names=["output"],
         dynamic_axes={
             "input_xyz": {0: "num_points"},
@@ -386,33 +392,33 @@ def generate_onnx(model, metadata):
     print(f"ONNX conversion: {delta}")
 
 
-def generate_trt(onnx_path, metadata, save_to, fp16=False, int8=False):
-    profile = Profile()
+# def generate_trt(onnx_path, metadata, save_to, fp16=False, int8=False):
+#     profile = Profile()
 
-    for key,value in metadata["shape"].items():
-        value = list(value)
-        profile.add(name=key, opt=value, max=value, min=[1, value[-1]])  # TODO: might need a change
-    
-    calibrator = None
-    if int8:
-        dataloader = DataLoader(
-            seed=42, 
-            iterations=5,
-            int_range=(1,25),
-            float_range=(-1.0, 1.0),
-            val_range=(0.0, 1.0)
-        )
+#     for key,value in metadata["shape"].items():
+#         value = list(value)
+#         profile.add(name=key, opt=value, max=value, min=[1, value[-1]])  # TODO: might need a change
 
-        calibrator = Calibrator(dataloader)
+#     calibrator = None
+#     if int8:
+#         dataloader = DataLoader(
+#             seed=42,
+#             iterations=5,
+#             int_range=(1,25),
+#             float_range=(-1.0, 1.0),
+#             val_range=(0.0, 1.0)
+#         )
 
-    build_engine = EngineFromNetwork(
-        NetworkFromOnnxPath(onnx_path),
-        config=CreateConfig(fp16=fp16, int8=int8, profiles = [profile], calibrator=calibrator)
-    )
+#         calibrator = Calibrator(dataloader)
 
-    build_engine = SaveEngine(build_engine, path=save_to)
-    build_engine()
-    print("TensorRT engine conversion done!")
+#     build_engine = EngineFromNetwork(
+#         NetworkFromOnnxPath(onnx_path),
+#         config=CreateConfig(fp16=fp16, int8=int8, profiles = [profile], calibrator=calibrator)
+#     )
+
+#     build_engine = SaveEngine(build_engine, path=save_to)
+#     build_engine()
+#     print("TensorRT engine conversion done!")
 
 
 def eval_aoi(run_id, logs_dir, output_dir, epoch_number, split, checkpoints_dir=None, root_dir=None, img_dir=None, gt_dir=None, save_onnx=False):
@@ -488,6 +494,7 @@ def eval_aoi(run_id, logs_dir, output_dir, epoch_number, split, checkpoints_dir=
             else:
                 sample[k] = [sample[k]]
         out_dir = os.path.join(output_dir, run_id, split)
+        print(out_dir)
         os.makedirs(out_dir, exist_ok=True)
         save_nerf_output_to_images(dataset, sample, results, out_dir, epoch_number)
 
@@ -522,8 +529,8 @@ def eval_aoi(run_id, logs_dir, output_dir, epoch_number, split, checkpoints_dir=
     print("Mean MAE: {:.3f}\n".format(np.mean(np.array(mae))))
 
     if save_onnx:
-        generate_onnx(models["coarse"], metadata)
-        generate_trt("./generated/model.onnx", metadata, int8=True, save_to="./generated/model-int8.engine")
+        generate_onnx(models["coarse"])
+        # generate_trt("./generated/model.onnx", metadata, int8=True, save_to="./generated/model-int8.engine")
 
     return np.mean(np.array(psnr)), np.mean(np.array(ssim)), np.mean(np.array(mae)),
 
@@ -555,11 +562,21 @@ def eval_aoi(run_id, logs_dir, output_dir, epoch_number, split, checkpoints_dir=
 
 
 if __name__ == "__main__":
-    run_id = "/data/exp-all/JAX_260_ds1_2gpu_batch4096_satnerf/"
-    logs_dir = "logs/2023-09-25_15-52-11_JAX_260_ds1_2gpu_batch4096_satnerf/"
-    epoch_number = 32
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--run-id", "-ri")
+    parser.add_argument("--logs-dir", "-ld")
+    parser.add_argument("--epochs", "-e", type=int)
+    cliargs = parser.parse_args()
+
+    # run_id = "/data/exp-all/JAX_004_ds1_2gpu_batch4096_satnerf/"
+    # logs_dir = "logs/2023-09-25_15-53-27_JAX_004_ds1_2gpu_batch4096_satnerf/"
+    # epoch_number = 32
+
+    run_id = cliargs.run_id
+    logs_dir = cliargs.logs_dir
+    epoch_number = cliargs.epochs
+
     split = "val"
     output_dir = "./exps-eval"
 
     eval_aoi(run_id, logs_dir, output_dir, epoch_number, split, save_onnx=True)
-

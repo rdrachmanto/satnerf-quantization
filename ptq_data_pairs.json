@@ -1,0 +1,37 @@
+{
+    "JAX_004": {
+        "run_id": "/data/exp-all/JAX_004_ds1_2gpu_batch4096_satnerf/",
+        "logs_dir": "logs/2023-09-25_15-53-27_JAX_004_ds1_2gpu_batch4096_satnerf/",
+        "epochs": 32
+    },
+    "JAX_070": {
+        "run_id": "/data/exp-all/JAX_070_ds1_2gpu_batch4096_satnerf/",
+        "logs_dir": "logs/2023-09-02_00-19-36_JAX_070_ds1_2gpu_batch4096_satnerf/",
+        "epochs": 28
+    },
+    "JAX_072": {
+        "run_id": "/data/exp-all/JAX_072_ds1_2gpu_batch4096_satnerf/",
+        "logs_dir": "logs/2023-09-03_17-29-01_JAX_072_ds1_2gpu_batch4096_satnerf/",
+        "epochs": 32
+    },
+    "JAX_260": {
+        "run_id": "/data/exp-all/JAX_260_ds1_2gpu_batch4096_satnerf/",
+        "logs_dir": "logs/2023-09-25_15-52-11_JAX_260_ds1_2gpu_batch4096_satnerf/",
+        "epochs": 32
+    },
+    "JAX_412": {
+        "run_id": "/data/exp-all/JAX_412_ds1_2gpu_batch4096_satnerf/",
+        "logs_dir": "logs/2023-09-19_02-43-50_JAX_412_ds1_2gpu_batch4096_satnerf/",
+        "epochs": 28
+    },
+    "JAX_467": {
+        "run_id": "/data/exp-all/JAX_467_ds1_2gpu_batch4096_satnerf/",
+        "logs_dir": "logs/2023-09-05_10-31-05_JAX_467_ds1_2gpu_batch4096_satnerf/",
+        "epochs": 24
+    },
+    "JAX_474": {
+        "run_id": "/data/exp-all/JAX_474_ds1_2gpu_batch4096_satnerf/",
+        "logs_dir": "logs/2023-09-22_14-30-01_JAX_474_ds1_2gpu_batch4096_satnerf/",
+        "epochs": 24
+    }
+}

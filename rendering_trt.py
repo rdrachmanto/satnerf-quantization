@@ -110,7 +110,7 @@ def render_rays(models, runner, args, rays, ts):
         sun_d = rays[:, 8:11]
         rays_t = models['t'](ts) if ts is not None else None
         # start = time.time()
-        result, metadata = inference_trt(runner, args, xyz_coarse, z_vals, rays_d=None, sun_d=sun_d, rays_t=rays_t)
+        result = inference_trt(runner, args, xyz_coarse, z_vals, rays_d=None, sun_d=sun_d, rays_t=rays_t)
         # print("[rendering.render_rays:99] Inference time: ", (time.time() - start) * 1000)
 
         # if args.sc_lambda > 0:
@@ -170,4 +170,4 @@ def render_rays(models, runner, args, rays, ts):
     #     for k in result.keys():
     #         result_["{}_{}".format(k, typ)] = result[k]
 
-    return result_, metadata
+    return result_ 

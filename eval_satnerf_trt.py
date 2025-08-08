@@ -87,7 +87,7 @@ def batched_inference(models, runner, rays, ts, args):
 
     return results
 
-def load_nerf(run_id, logs_dir, ckpts_dir, epoch_number):
+def load_nerf(run_id, logs_dir, ckpts_dir, epoch_number, trt_path):
 
     log_path = os.path.join(run_id, logs_dir)
     with open('{}/opts.json'.format(log_path), 'r') as f:
@@ -117,7 +117,7 @@ def load_nerf(run_id, logs_dir, ckpts_dir, epoch_number):
         load_ckpt(embedding_t, checkpoint_path, model_name='embedding_t')
         models["t"] = embedding_t.cuda().eval()
 
-    models["trt"] = EngineFromBytes(BytesFromPath("/data/rdr78068/satnerf-base/model_int8.engine"))
+    models["trt"] = EngineFromBytes(BytesFromPath(trt_path))
 
     return models
 
@@ -344,7 +344,7 @@ def predefined_val_ts(img_id):
 # $dataset_dir/DFC2019/Track3-RGB-crops/JAX_068 -> img_dir
 # $dataset_dir/DFC2019/Track3-Truth -> gt_dir
 
-def eval_aoi(run_id, logs_dir, output_dir, epoch_number, split, checkpoints_dir=None, root_dir=None, img_dir=None, gt_dir=None):
+def eval_aoi(run_id, logs_dir, output_dir, epoch_number, split, trt_path, checkpoints_dir=None, root_dir=None, img_dir=None, gt_dir=None):
     with open('{}/opts.json'.format(os.path.join(run_id, logs_dir)), 'r') as f:
         args = argparse.Namespace(**json.load(f))
         print(args)
@@ -366,7 +366,7 @@ def eval_aoi(run_id, logs_dir, output_dir, epoch_number, split, checkpoints_dir=
         checkpoints_dir = args.ckpts_dir
         print(f"Checkpoints dir: {checkpoints_dir}")
 
-    models = load_nerf(run_id, logs_dir, checkpoints_dir, epoch_number-1)
+    models = load_nerf(run_id, logs_dir, checkpoints_dir, epoch_number-1, trt_path)
 
     # prepare dataset
     dataset = SatelliteDataset(args.root_dir,
@@ -413,7 +413,7 @@ def eval_aoi(run_id, logs_dir, output_dir, epoch_number, split, checkpoints_dir=
             _ = batched_inference(models, runner, rays, ts, args)
             end = time.perf_counter()
             print("Warmup time: ", end-start)
-            
+
 
 
         print("Inference...")
@@ -439,7 +439,7 @@ def eval_aoi(run_id, logs_dir, output_dir, epoch_number, split, checkpoints_dir=
             start = time.perf_counter()
             results = batched_inference(models, runner, rays, ts, args)
             end = time.perf_counter()
-            
+
             print("Inference time: ", end-start)
 
             for k in sample.keys():
@@ -449,6 +449,7 @@ def eval_aoi(run_id, logs_dir, output_dir, epoch_number, split, checkpoints_dir=
                     sample[k] = [sample[k]]
             out_dir = os.path.join(output_dir, run_id, split)
             os.makedirs(out_dir, exist_ok=True)
+            print(out_dir)
             save_nerf_output_to_images(dataset, sample, results, out_dir, epoch_number)
 
             # image metrics
@@ -538,10 +539,22 @@ def eval_aoi(run_id, logs_dir, output_dir, epoch_number, split, checkpoints_dir=
 #
 
 if __name__ == "__main__":
-    run_id = "/data/exp-all/JAX_260_ds1_2gpu_batch4096_satnerf/"
-    logs_dir = "logs/2023-09-25_15-52-11_JAX_260_ds1_2gpu_batch4096_satnerf/"
-    epoch_number = 32
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--run-id", "-ri")
+    parser.add_argument("--logs-dir", "-ld")
+    parser.add_argument("--epochs", "-e", type=int)
+    parser.add_argument("--trt-path", "-tp")
+    cliargs = parser.parse_args()
+
+    # run_id = "/data/exp-all/JAX_004_ds1_2gpu_batch4096_satnerf/"
+    # logs_dir = "logs/2023-09-25_15-53-27_JAX_004_ds1_2gpu_batch4096_satnerf/"
+    # epoch_number = 28
+
+    run_id = cliargs.run_id
+    logs_dir = cliargs.logs_dir
+    epoch_number = cliargs.epochs
+
     split = "val"
     output_dir = "./exps-eval"
 
-    eval_aoi(run_id, logs_dir, output_dir, epoch_number, split)
+    eval_aoi(run_id, logs_dir, output_dir, epoch_number, split, cliargs.trt_path)

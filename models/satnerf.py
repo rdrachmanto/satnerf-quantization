@@ -42,9 +42,9 @@ def inference_trt(runner, args, rays_xyz, z_vals, rays_d=None, sun_d=None, rays_
     chunk = args.chunk
     batch_size = xyz_.shape[0]
 
-    print(xyz_.shape)
-    print(sun_d_.shape)
-    print(rays_t_.shape)
+    # print(xyz_.shape)
+    # print(sun_d_.shape)
+    # print(rays_t_.shape)
 
     out = None
     out = runner.infer(feed_dict={
